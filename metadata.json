@@ -1,0 +1,6 @@
+{
+  "name": "AI Account Pool Manager",
+  "description": "Bảng điều khiển quản lý nhóm tài khoản AI (Account Pool), theo dõi trạng thái, hạn mức quota, thời gian cooldown và thuật toán xoay vòng rotation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
