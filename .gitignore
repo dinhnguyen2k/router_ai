@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Router state: encrypted credentials, local token, request log
+.router-data/
+.router-e2e/

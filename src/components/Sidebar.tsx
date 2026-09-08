@@ -5,7 +5,9 @@ import {
   RefreshCw, 
   Plus, 
   Database,
-  Hourglass
+  Hourglass,
+  ScrollText,
+  CircleAlert
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -17,7 +19,8 @@ interface SidebarProps {
   cooldownCount: number;
   totalCount: number;
   onOpenAddModal: () => void;
-  onQuickRotate: () => void;
+  /** Null while the router has not answered yet. */
+  routerOnline: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -29,7 +32,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   cooldownCount,
   totalCount,
   onOpenAddModal,
-  onQuickRotate
+  routerOnline
 }) => {
   const navigationItems = [
     { 
@@ -50,6 +53,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: RefreshCw, 
       badge: cooldownCount > 0 ? `${cooldownCount} chờ` : undefined,
       badgeColor: 'bg-amber-50 text-amber-700 border border-amber-200'
+    },
+    {
+      id: 'logs',
+      label: 'Nhật ký request',
+      icon: ScrollText
     },
   ];
 
@@ -154,14 +162,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
 
-            <button
-              id="btn-sidebar-quick-rotate"
-              onClick={onQuickRotate}
-              className="w-full py-1.5 px-2 rounded-md bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-medium transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <RefreshCw className="h-3 w-3 text-slate-500" />
-              Xoay Vòng Tiếp Theo
-            </button>
+            <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-slate-200">
+              <span className="text-slate-500">Router:</span>
+              {routerOnline ? (
+                <span className="inline-flex items-center gap-1.5 text-emerald-600 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  Đang chạy
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-rose-600 font-medium">
+                  <CircleAlert className="h-3 w-3" />
+                  Mất kết nối
+                </span>
+              )}
+            </div>
           </div>
 
           <button

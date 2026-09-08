@@ -3,246 +3,118 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { AccountTable } from './components/AccountTable';
 import { QuotaCharts } from './components/QuotaCharts';
 import { RotationView } from './components/RotationView';
+import { LogsView } from './components/LogsView';
 import { AccountDetailModal } from './components/AccountDetailModal';
 import { AddAccountModal } from './components/AddAccountModal';
-import { INITIAL_ACCOUNTS } from './mockData';
-import { AIAccount, RotationStrategy } from './types';
-import { 
-  CheckCircle2, 
-  Zap, 
-  RotateCw, 
-  Hourglass
+import { api } from './api/client';
+import {
+  useAccounts,
+  useLogs,
+  useMetrics,
+  useProviderUsage,
+  useStaticConfig,
+  useStatus,
+  useTimeline
+} from './hooks/useRouterData';
+import { formatTokens } from './types';
+import type { CreateAccountInput, SelectionStrategy } from '../shared/types';
+import {
+  CheckCircle2,
+  Zap,
+  Hourglass,
+  AlertCircle,
+  Activity
 } from 'lucide-react';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export default function App() {
-  const [accounts, setAccounts] = useState<AIAccount[]>(INITIAL_ACCOUNTS);
   const [activeTab, setActiveTab] = useState<string>('accounts');
-  const [strategy, setStrategy] = useState<RotationStrategy>('round_robin');
-  const [selectedAccount, setSelectedAccount] = useState<AIAccount | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [notification, setNotification] = useState<string | null>(null);
 
-  // Toast notification helper
-  const showToast = (msg: string) => {
-    setNotification(msg);
-    setTimeout(() => {
-      setNotification(null);
-    }, 3000);
-  };
+  const accountsState = useAccounts();
+  const statusState = useStatus();
+  const metricsState = useMetrics(DAY_MS);
+  const timelineState = useTimeline(DAY_MS, 24);
+  const providerUsageState = useProviderUsage(DAY_MS);
+  const logsState = useLogs({ limit: 150 }, activeTab === 'logs');
+  const { providers, connection } = useStaticConfig();
 
-  // Cooldown countdown timer interval (ticks every second)
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setAccounts(prevAccounts => 
-        prevAccounts.map(acc => {
-          if ((acc.status === 'cooldown' || acc.cooldown.isInCooldown) && acc.cooldown.remainingSeconds > 0) {
-            const newRemaining = acc.cooldown.remainingSeconds - 1;
-            if (newRemaining <= 0) {
-              return {
-                ...acc,
-                status: 'active',
-                cooldown: {
-                  ...acc.cooldown,
-                  isInCooldown: false,
-                  remainingSeconds: 0,
-                  reason: 'Đã hoàn tất hồi chiêu',
-                  triggerTimestamp: 'Vừa xong'
-                }
-              };
-            }
-            return {
-              ...acc,
-              cooldown: {
-                ...acc.cooldown,
-                remainingSeconds: newRemaining
-              }
-            };
-          }
-          return acc;
-        })
-      );
-    }, 1000);
+  const accounts = accountsState.data;
+  const status = statusState.data;
+  // A failed status poll is the clearest signal the router process is gone; the
+  // account poll can also fail, but status is the lightest request we make.
+  const routerOnline = statusState.error === null && !statusState.loading;
 
-    return () => clearInterval(timer);
+  const showToast = useCallback((message: string) => {
+    setNotification(message);
+    setTimeout(() => setNotification(null), 3000);
   }, []);
 
-  // Filter calculations
-  const activeServingAccount = accounts.find(a => a.status === 'in_use') || accounts.find(a => a.status === 'active');
-  const readyAccounts = accounts.filter(a => a.status === 'active');
-  const cooldownAccounts = accounts.filter(a => a.status === 'cooldown' || a.cooldown.isInCooldown);
+  /** Runs a mutation, refreshes the affected views, and reports the outcome. */
+  const mutate = useCallback(
+    async (action: () => Promise<unknown>, successMessage: string) => {
+      try {
+        await action();
+        accountsState.refresh();
+        statusState.refresh();
+        showToast(successMessage);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Thao tác thất bại');
+      }
+    },
+    [accountsState, statusState, showToast],
+  );
+
+  const selectedAccount = accounts.find(a => a.id === selectedAccountId) ?? null;
+
+  const heldAccounts = accounts.filter(
+    a => a.status === 'cooldown' || a.status === 'temp_error' || a.status === 'quota_exceeded'
+  );
   const activeCount = accounts.filter(a => a.status === 'active' || a.status === 'in_use').length;
+  const servingAccount =
+    accounts.find(a => a.id === status?.servingAccountId) ??
+    accounts.find(a => a.status === 'in_use') ??
+    accounts.find(a => a.status === 'active');
 
-  const totalUsedTokens = accounts.reduce((sum, a) => sum + a.quota.usedTokens, 0);
-  const totalLimitTokens = accounts.reduce((sum, a) => sum + a.quota.totalTokens, 0);
-  const usagePercent = Math.round((totalUsedTokens / totalLimitTokens) * 100);
+  const todayTokens = accounts.reduce((sum, a) => sum + a.quota.todayTokens, 0);
+  const totalBudget = accounts.reduce((sum, a) => sum + a.quota.dailyTokenBudget, 0);
+  const budgetPercent = totalBudget > 0 ? Math.min(100, Math.round((todayTokens / totalBudget) * 100)) : null;
 
-  const formatTokens = (val: number) => {
-    if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
-    if (val >= 1_000) return `${(val / 1_000).toFixed(0)}k`;
-    return val.toString();
+  const handleAddAccount = async (input: CreateAccountInput) => {
+    await api.createAccount(input);
+    accountsState.refresh();
+    showToast(`Đã thêm tài khoản: ${input.name || input.provider}`);
   };
 
-  // Quick Rotate to next ready account
-  const handleForceRotate = () => {
-    const candidateAccounts = accounts.filter(a => a.status === 'active' || a.status === 'in_use');
-    if (candidateAccounts.length <= 1) {
-      showToast('Cần ít nhất 2 tài khoản sẵn sàng để xoay vòng!');
-      return;
-    }
-
-    const currentActiveIndex = accounts.findIndex(a => a.status === 'in_use');
-    let nextIndex = -1;
-
-    if (currentActiveIndex === -1) {
-      nextIndex = accounts.findIndex(a => a.status === 'active');
-    } else {
-      for (let i = 1; i <= accounts.length; i++) {
-        const candidateIdx = (currentActiveIndex + i) % accounts.length;
-        if (accounts[candidateIdx].status === 'active') {
-          nextIndex = candidateIdx;
-          break;
-        }
-      }
-    }
-
-    if (nextIndex !== -1) {
-      const nextAcc = accounts[nextIndex];
-      setAccounts(prev => prev.map((acc, idx) => {
-        if (idx === nextIndex) {
-          return { ...acc, status: 'in_use', lastUsedAt: 'Vừa xong' };
-        }
-        if (acc.status === 'in_use') {
-          return { ...acc, status: 'active' };
-        }
-        return acc;
-      }));
-
-      showToast(`Đã xoay vòng sang: ${nextAcc.name}`);
-    }
+  const handleCopyEndpoint = () => {
+    if (connection === null) return;
+    const snippet = [
+      `# Antigravity CLI — ~/.gemini/antigravity-cli/settings.json`,
+      `#   { "modelProvider": "gemini" }`,
+      `export GOOGLE_GEMINI_BASE_URL=${connection.baseUrl}`,
+      `export GEMINI_API_KEY=${connection.token}`,
+      ``,
+      `# Client OpenAI-compatible`,
+      `#   base URL: ${connection.openaiBaseUrl}`,
+      `#   api key : ${connection.token}`
+    ].join('\n');
+    void navigator.clipboard.writeText(snippet);
+    showToast('Đã sao chép cấu hình kết nối');
   };
 
-  // Trigger Cooldown manually
-  const handleTriggerCooldown = (accountId: string) => {
-    const targeted = accounts.find(a => a.id === accountId);
-    setAccounts(prev => prev.map(acc => {
-      if (acc.id === accountId) {
-        return {
-          ...acc,
-          status: 'cooldown',
-          cooldown: {
-            isInCooldown: true,
-            remainingSeconds: 120,
-            totalDurationSeconds: 120,
-            reason: 'Rate limit 429 (Chạm trần RPM)',
-            triggerTimestamp: 'Vừa kích hoạt'
-          }
-        };
-      }
-      return acc;
-    }));
-
-    // If active serving account entered cooldown, auto rotate
-    if (targeted?.status === 'in_use') {
-      setTimeout(() => handleForceRotate(), 100);
-    }
-
-    showToast(`Đã đưa ${targeted?.name || 'tài khoản'} vào Cooldown 120s`);
-  };
-
-  // Clear Cooldown manually
-  const handleClearCooldown = (accountId: string) => {
-    setAccounts(prev => prev.map(acc => {
-      if (acc.id === accountId) {
-        return {
-          ...acc,
-          status: 'active',
-          cooldown: {
-            isInCooldown: false,
-            remainingSeconds: 0,
-            totalDurationSeconds: 120,
-            reason: 'Đã gỡ cooldown thủ công',
-            triggerTimestamp: 'Vừa xong'
-          }
-        };
-      }
-      return acc;
-    }));
-
-    showToast('Đã gỡ Cooldown, tài khoản sẵn sàng');
-  };
-
-  // Clear All Cooldowns
-  const handleClearAllCooldowns = () => {
-    setAccounts(prev => prev.map(acc => {
-      if (acc.status === 'cooldown' || acc.cooldown.isInCooldown) {
-        return {
-          ...acc,
-          status: 'active',
-          cooldown: {
-            isInCooldown: false,
-            remainingSeconds: 0,
-            totalDurationSeconds: 120,
-            reason: 'Đã gỡ toàn bộ cooldown',
-            triggerTimestamp: 'Vừa xong'
-          }
-        };
-      }
-      return acc;
-    }));
-
-    showToast('Đã gỡ bỏ toàn bộ cooldown trong Pool');
-  };
-
-  // Set as Active Serving
-  const handleMakeActive = (accountId: string) => {
-    const acc = accounts.find(a => a.id === accountId);
-    if (!acc) return;
-
-    setAccounts(prev => prev.map(a => {
-      if (a.id === accountId) {
-        return { ...a, status: 'in_use', lastUsedAt: 'Vừa xong' };
-      }
-      if (a.status === 'in_use') {
-        return { ...a, status: 'active' };
-      }
-      return a;
-    }));
-
-    showToast(`Đã chuyển sang dùng ${acc.name}`);
-  };
-
-  // Reset Quota
-  const handleResetQuota = (accountId: string) => {
-    setAccounts(prev => prev.map(a => {
-      if (a.id === accountId) {
-        return {
-          ...a,
-          quota: {
-            ...a.quota,
-            usedTokens: 0,
-            dailySpentUsd: 0,
-            rpmCurrent: 0,
-            tpmCurrent: 0
-          }
-        };
-      }
-      return a;
-    }));
-
-    showToast('Đã làm mới hạn mức Token');
-  };
-
-  // Add new account
-  const handleAddAccount = (newAcc: AIAccount) => {
-    setAccounts(prev => [newAcc, ...prev]);
-    showToast(`Đã thêm tài khoản: ${newAcc.name}`);
+  const handleCopy = (label: string, value: string) => {
+    void navigator.clipboard.writeText(value);
+    showToast(`Đã sao chép ${label}`);
   };
 
   return (
@@ -262,10 +134,10 @@ export default function App() {
         isOpenMobile={isMobileSidebarOpen}
         setIsOpenMobile={setIsMobileSidebarOpen}
         activeCount={activeCount}
-        cooldownCount={cooldownAccounts.length}
+        cooldownCount={heldAccounts.length}
         totalCount={accounts.length}
         onOpenAddModal={() => setIsAddModalOpen(true)}
-        onQuickRotate={handleForceRotate}
+        routerOnline={routerOnline}
       />
 
       {/* Main Content Area */}
@@ -274,14 +146,26 @@ export default function App() {
         <Navbar
           onToggleMobileSidebar={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
           onOpenAddModal={() => setIsAddModalOpen(true)}
-          onQuickRotate={handleForceRotate}
-          activeAccountName={activeServingAccount?.name}
-          activeCount={activeCount}
-          totalCount={accounts.length}
+          onCopyEndpoint={handleCopyEndpoint}
+          activeAccountName={servingAccount?.name}
+          endpoint={connection?.baseUrl}
         />
 
         {/* Page Content Container */}
         <main className="flex-1 p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-5">
+          {/* Router unreachable banner */}
+          {statusState.error !== null && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 flex items-start gap-2.5">
+              <AlertCircle className="h-4 w-4 text-rose-600 mt-0.5 shrink-0" />
+              <div>
+                <h4 className="text-xs font-semibold text-rose-900">Không kết nối được Router</h4>
+                <p className="text-[11px] text-rose-700 mt-0.5">
+                  {statusState.error} — chạy <code className="font-mono">npm start</code> để khởi động router.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Main Account Pool & Status View */}
           {activeTab === 'accounts' && (
             <>
@@ -298,23 +182,22 @@ export default function App() {
 
                   <div className="my-2">
                     <div className="font-semibold text-slate-900 text-sm truncate">
-                      {activeServingAccount ? activeServingAccount.name : 'Chưa chọn'}
+                      {servingAccount ? servingAccount.name : 'Chưa có'}
                     </div>
                     <div className="text-xs text-slate-500 font-mono mt-0.5 flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                      {activeServingAccount ? `${activeServingAccount.provider} • ${activeServingAccount.modelTier}` : 'Không có'}
+                      <span className={`w-1.5 h-1.5 rounded-full ${servingAccount ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                      {servingAccount
+                        ? `${servingAccount.providerLabel} • ${servingAccount.modelSummary}`
+                        : 'Thêm API key để bắt đầu'}
                     </div>
                   </div>
 
                   <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
-                    <span className="text-[11px] text-slate-500">Chuyển slot:</span>
-                    <button
-                      onClick={handleForceRotate}
-                      className="text-xs font-medium text-slate-700 hover:text-slate-900 flex items-center gap-1 cursor-pointer"
-                    >
-                      <RotateCw className="h-3 w-3 text-slate-500" />
-                      Xoay vòng ngay
-                    </button>
+                    <span className="text-[11px] text-slate-500">Đang chạy:</span>
+                    <span className="text-xs font-medium text-slate-700 flex items-center gap-1 font-mono">
+                      <Activity className="h-3 w-3 text-slate-500" />
+                      {status?.inFlight ?? 0} request
+                    </span>
                   </div>
                 </div>
 
@@ -337,18 +220,20 @@ export default function App() {
                   </div>
 
                   <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
-                    {cooldownAccounts.length > 0 ? (
+                    {heldAccounts.length > 0 ? (
                       <span className="text-amber-700 flex items-center gap-1 font-medium">
                         <Hourglass className="h-3 w-3 text-amber-600" />
-                        {cooldownAccounts.length} tài khoản đang hồi chiêu
+                        {heldAccounts.length} tài khoản đang chờ
                       </span>
                     ) : (
-                      <span className="text-slate-500">100% tài khoản hoạt động tốt</span>
+                      <span className="text-slate-500">
+                        {accounts.length === 0 ? 'Pool đang trống' : 'Toàn bộ pool khả dụng'}
+                      </span>
                     )}
 
-                    {cooldownAccounts.length > 0 && (
+                    {heldAccounts.length > 0 && (
                       <button
-                        onClick={handleClearAllCooldowns}
+                        onClick={() => void mutate(() => api.clearAllCooldowns(), 'Đã gỡ toàn bộ cooldown')}
                         className="text-xs text-slate-600 hover:text-slate-900 font-medium cursor-pointer"
                       >
                         Gỡ tất cả
@@ -357,31 +242,36 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Quota Usage */}
+                {/* Token usage today */}
                 <div className="p-4 rounded-lg bg-white border border-slate-200 shadow-xs flex flex-col justify-between">
                   <div className="flex items-center justify-between text-xs text-slate-500">
-                    <span className="font-medium">Tổng hạn mức Token</span>
+                    <span className="font-medium">Token dùng hôm nay</span>
                     <span className="text-xs font-mono font-semibold text-slate-700">
-                      {usagePercent}%
+                      {budgetPercent === null ? '—' : `${budgetPercent}%`}
                     </span>
                   </div>
 
                   <div className="my-2">
                     <div className="text-sm font-bold font-mono text-slate-900">
-                      {formatTokens(totalUsedTokens)} <span className="text-xs font-normal text-slate-500">/ {formatTokens(totalLimitTokens)}</span>
+                      {formatTokens(todayTokens)}
+                      {totalBudget > 0 && (
+                        <span className="text-xs font-normal text-slate-500"> / {formatTokens(totalBudget)}</span>
+                      )}
                     </div>
                     <div className="w-full bg-slate-100 h-1.5 rounded-full mt-2 overflow-hidden">
-                      <div 
+                      <div
                         className="bg-slate-800 h-full rounded-full transition-all duration-300"
-                        style={{ width: `${usagePercent}%` }}
+                        style={{ width: `${budgetPercent ?? 0}%` }}
                       />
                     </div>
                   </div>
 
                   <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-                    <span>Còn lại: <strong className="text-slate-700 font-mono">{formatTokens(totalLimitTokens - totalUsedTokens)}</strong></span>
-                    <button 
-                      onClick={() => setActiveTab('quota')} 
+                    <span>
+                      {metricsState.data?.totalRequests ?? 0} request / 24h
+                    </span>
+                    <button
+                      onClick={() => setActiveTab('quota')}
                       className="text-slate-700 hover:text-slate-900 font-medium cursor-pointer"
                     >
                       Xem biểu đồ →
@@ -393,38 +283,58 @@ export default function App() {
               {/* Account Table */}
               <AccountTable
                 accounts={accounts}
-                onSelectAccount={setSelectedAccount}
-                onToggleStatus={(id) => {
-                  const target = accounts.find(a => a.id === id);
-                  if (target?.status === 'cooldown' || target?.cooldown.isInCooldown) {
-                    handleClearCooldown(id);
-                  } else {
-                    handleTriggerCooldown(id);
-                  }
-                }}
-                onTriggerCooldown={handleTriggerCooldown}
-                onClearCooldown={handleClearCooldown}
-                onMakeActive={handleMakeActive}
+                onSelectAccount={(account) => setSelectedAccountId(account.id)}
+                onTriggerCooldown={(id) =>
+                  void mutate(
+                    () => api.forceCooldown(id, 120_000, 'Tạm rút khỏi pool thủ công'),
+                    'Đã tạm rút tài khoản khỏi pool 120s',
+                  )
+                }
+                onClearCooldown={(id) =>
+                  void mutate(() => api.clearCooldown(id), 'Đã gỡ cooldown, tài khoản sẵn sàng')
+                }
+                onMakeActive={(id) =>
+                  void mutate(() => api.updateAccount(id, { enabled: true }), 'Đã bật lại tài khoản')
+                }
               />
             </>
           )}
 
-          {/* Quota Charts View */}
+          {/* Metrics View */}
           {activeTab === 'quota' && (
-            <QuotaCharts accounts={accounts} />
+            <QuotaCharts
+              accounts={accounts}
+              metrics={metricsState.data}
+              timeline={timelineState.data}
+              providerUsage={providerUsageState.data}
+            />
           )}
 
           {/* Rotation & Cooldown View */}
           {activeTab === 'rotation' && (
             <RotationView
               accounts={accounts}
-              strategy={strategy}
-              onSelectStrategy={setStrategy}
-              onForceRotate={handleForceRotate}
-              onClearCooldown={handleClearCooldown}
-              onClearAllCooldowns={handleClearAllCooldowns}
-              onTriggerCooldown={handleTriggerCooldown}
+              strategy={status?.strategy ?? 'round_robin'}
+              onSelectStrategy={(strategy: SelectionStrategy) =>
+                void mutate(
+                  () => api.updateSettings({ strategy }),
+                  'Đã đổi thuật toán định tuyến',
+                )
+              }
+              onClearCooldown={(id) =>
+                void mutate(() => api.clearCooldown(id), 'Đã gỡ cooldown')
+              }
+              onClearAllCooldowns={() =>
+                void mutate(() => api.clearAllCooldowns(), 'Đã gỡ toàn bộ cooldown')
+              }
+              connection={connection}
+              onCopy={handleCopy}
             />
+          )}
+
+          {/* Request Logs */}
+          {activeTab === 'logs' && (
+            <LogsView logs={logsState.data} loading={logsState.loading} />
           )}
         </main>
       </div>
@@ -433,11 +343,25 @@ export default function App() {
       {selectedAccount && (
         <AccountDetailModal
           account={selectedAccount}
-          onClose={() => setSelectedAccount(null)}
-          onClearCooldown={handleClearCooldown}
-          onTriggerCooldown={handleTriggerCooldown}
-          onMakeActive={handleMakeActive}
-          onResetQuota={handleResetQuota}
+          onClose={() => setSelectedAccountId(null)}
+          onClearCooldown={(id) =>
+            void mutate(() => api.clearCooldown(id), 'Đã gỡ cooldown')
+          }
+          onTriggerCooldown={(id) =>
+            void mutate(
+              () => api.forceCooldown(id, 120_000, 'Tạm rút khỏi pool thủ công'),
+              'Đã tạm rút tài khoản khỏi pool',
+            )
+          }
+          onToggleEnabled={(id, enabled) =>
+            void mutate(
+              () => api.updateAccount(id, { enabled }),
+              enabled ? 'Đã bật lại tài khoản' : 'Đã tắt tài khoản',
+            )
+          }
+          onDelete={(id) =>
+            void mutate(() => api.deleteAccount(id), 'Đã xóa tài khoản khỏi pool')
+          }
         />
       )}
 
@@ -446,6 +370,7 @@ export default function App() {
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
         onAddAccount={handleAddAccount}
+        providers={providers}
       />
     </div>
   );

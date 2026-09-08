@@ -1,26 +1,24 @@
 import React from 'react';
 import { 
   Menu, 
-  RotateCw, 
+  Copy, 
   Plus
 } from 'lucide-react';
 
 interface NavbarProps {
   onToggleMobileSidebar: () => void;
   onOpenAddModal: () => void;
-  onQuickRotate: () => void;
+  onCopyEndpoint: () => void;
   activeAccountName?: string;
-  activeCount: number;
-  totalCount: number;
+  endpoint?: string;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   onToggleMobileSidebar,
   onOpenAddModal,
-  onQuickRotate,
+  onCopyEndpoint,
   activeAccountName,
-  activeCount,
-  totalCount
+  endpoint
 }) => {
   return (
     <header className="h-14 px-4 sm:px-6 bg-white/90 backdrop-blur-xs border-b border-slate-200 flex items-center justify-between sticky top-0 z-30">
@@ -45,7 +43,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           ) : (
             <div className="flex items-center gap-1.5 text-xs text-amber-700 font-medium">
-              <span>Chưa chỉ định tài khoản chính</span>
+              <span>Pool chưa có tài khoản khả dụng</span>
             </div>
           )}
         </div>
@@ -54,13 +52,14 @@ export const Navbar: React.FC<NavbarProps> = ({
       {/* Right: Actions */}
       <div className="flex items-center gap-2">
         <button
-          id="btn-navbar-rotate"
-          onClick={onQuickRotate}
+          id="btn-navbar-copy-endpoint"
+          onClick={onCopyEndpoint}
           className="px-3 py-1.5 rounded-md bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium border border-slate-200 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
-          title="Xoay vòng sang tài khoản tiếp theo trong hàng đợi"
+          title="Sao chép endpoint và token để cấu hình CLI"
         >
-          <RotateCw className="h-3.5 w-3.5 text-slate-500" />
-          <span>Xoay Vòng</span>
+          <Copy className="h-3.5 w-3.5 text-slate-500" />
+          <span className="hidden sm:inline font-mono">{endpoint ?? 'Endpoint'}</span>
+          <span className="sm:hidden">Endpoint</span>
         </button>
 
         <button
